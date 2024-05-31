@@ -1,0 +1,159 @@
+# FeCr CSA multiple cascade
+# Stefano Segantin, July 2021
+# Politecnico di Torino
+
+# ---------- INITIALIZATION ----------------------------------------------------
+clear
+echo         both
+timer		     full
+units		     metal  # A ps K bar eV
+dimension	   3
+boundary	   p p p
+atom_style	 atomic
+atom_modify	 map array
+
+# -------- VARIABLES -----------------------------------------------------------
+variable	  ao equal 3.147 #replace with lattice constant for associated potential
+variable    cnacut equal "v_ao*1.207"   #replace w factor associated with structure (fcc, bcc, hcp)
+variable    lBox equal 20 #replace with correct box size
+variable    LBox equal ${lBox}*2
+variable    corel equal "v_lBox - 1.0"
+
+variable    myT equal 300
+variable    relaxSteps equal 1000
+variable    pkaSteps equal 20000
+
+variable    mo equal 1.00 #change based on element
+variable    Mo equal 100*${mo} #change based on element
+
+# ---------- start loop --------------------------------------------------------
+variable    loopNum loop 51
+variable    pkaNum equal ${loopNum}-1
+
+variable    TSeed equal 1867
+variable    pkaIDSeed equal 2129
+variable    angle1Seed equal 643
+variable    angle2Seed equal 11483
+
+variable    pkaEnergy equal 300   # replace with pka energy in eV
+
+# ---------- GEOMETRY DEFINITION -----------------------------------------------
+#log         ${loopNum}.log
+
+lattice	    bcc ${ao} #replace w correct structure (fcc, bcc, hcp)
+
+region		  whole block -${lBox} ${lBox} -${lBox} ${lBox} -${lBox} ${lBox}
+read_data   data.Mo.20.0.0 #replace with data file
+
+group		Mo type 1 #replace with correct element
+
+region      coregion block -${corel} ${corel} -${corel} ${corel} -${corel} ${corel}
+group       core region coregion
+group       boundary subtract all core
+
+# --------- FORCE FIELD -------------------------------------------------------
+mass    1 95.94 #replace with correct mass, got this from nist / iupac, check w stefano about checking paper
+
+#pair_style       hybrid/overlay eam/fs zbl 1.8 2 #replace with correct constants
+#pair_coeff       * * eam/fs Mendelev_Cu2_2012.eam.fs Cu #replace with potential file 
+#pair_coeff       1 1 zbl 29.0 29.0 #replace with atomic number of element
+
+pair_style       eam/fs
+pair_coeff       * * WMo.eam.fs Mo
+
+#neighbor	 0.3 bin
+#neigh_modify	 delay 5
+neigh_modify    every 1 delay 0 check yes
+
+# ---------- DYNAMICS ----------------------------------------------------------
+run         0
+# PRINT-SCREEN
+#thermo		1000
+#thermo_style	custom step dt pe lx ly lz press pxx pyy pzz
+#minimize     1e-20 1e-20 25000 25000
+# --------- set temperature ----------------------------------------------------
+reset_timestep   0
+timestep	       0.001
+velocity         all create ${myT} ${TSeed} dist gaussian rot yes #dist gaussian  # apply temperature to atoms
+fix		           isoPisoT all npt temp ${myT} ${myT} 0.1 iso 0 0 0.5 drag 1.0  # npt ensemble
+#fix		           NHall all nvt temp ${myT} ${myT} 0.1  # Nosé-Hoover thermostat
+#compute     CNA  all cna/atom ${cnacut}
+#compute     PE all pe/atom
+#compute     csym all centro/atom fcc #change based on crystal structure
+#dump                min2 all custom 100 dump_Fe${Fe}.vis.1.${pkaNum} id type x y z c_csym c_PE c_CNA
+run              ${relaxSteps}
+#undump 		min2
+#unfix            NHall
+unfix           isoPisoT
+# --------- run PKA cascade ----------------------------------------------------
+# random choice of the PKA
+variable	       N equal count(all)
+variable         randpka equal round(random(1,$N,${loopNum}*${pkaIDSeed}))
+variable         mypka equal ${randpka}*1
+group            PKA id ${mypka}
+variable         pkaType equal type[v_mypka]
+variable         pkaMass equal mass(PKA)
+variable         xpka equal x[v_mypka]
+variable         ypka equal y[v_mypka]
+variable         zpka equal z[v_mypka]
+variable          Dx equal "-v_xpka"
+variable          Dy equal "-v_ypka"
+variable          Dz equal "-v_zpka"
+
+# set PKA velocity
+variable    randangle1  equal random(0,2*PI,${loopNum}*${angle1Seed})
+variable    angle1 equal ${randangle1}*1
+variable    randangle2  equal random(0,2*PI,${loopNum}*${angle2Seed})
+variable    angle2 equal ${randangle2}*1
+variable    pkaV  equal "sqrt(v_pkaEnergy*19296.823743/v_pkaMass)"  # A/ps
+variable    pkaVz  equal "-v_pkaV*cos(v_angle1)"
+variable    pkaVx  equal "-v_pkaV*sin(v_angle1)*cos(v_angle2)"
+variable    pkaVy  equal "-v_pkaV*sin(v_angle1)*sin(v_angle2)"
+
+compute         PE1 all pe/atom
+compute         KE1 all ke/atom
+compute         csym1 all centro/atom bcc #change based on structure
+
+dump	        run2 all custom 100 dump_Mo${Mo}.d.0.${pkaNum} id type x y z c_csym1 c_PE1 c_KE1
+
+displace_atoms   all move v_Dx v_Dy v_Dz units box
+fix              microCE core nve  # microcanonical ensemble to all the box
+fix              NHbound boundary temp/rescale 1 ${myT} ${myT} 2 1  # T bath
+fix		           adaptdt all dt/reset 1 1.0e-6 1.0e-3 0.05 units box
+if               "${pkaNum} > 0" then "velocity         PKA set v_pkaVx v_pkaVy v_pkaVz units box" #  A/ps
+
+#fix              microCE core nve  # fix a microcanonica ensemble to the box except the therostated boundaries
+run         ${pkaSteps} 
+undump run2
+
+# ---------- minimize ----------------------------------------------------------
+# minimize and dump
+compute     CNA2  all cna/atom ${cnacut}
+compute     PE2 all pe/atom
+compute     csym2 all centro/atom bcc #change based on structure
+dump		    min3 all custom 10000 dump_Mo${Mo}.1.${pkaNum} id type x y z c_csym2 c_PE2 c_CNA2 #replace with right var name
+minimize    1e-20 1e-20 15000 15000
+undump      min3
+
+# unfix the adaptive timestep, the nve and nvt ensembles and clear all the groups
+unfix       NHbound
+unfix       microCE
+unfix       adaptdt
+group       PKA clear
+group       Mo clear #change based on structure 
+group       core clear
+group       boundary clear
+# ---------- OUTPUTS -----------------------------------------------------------
+# WRITE FILES
+write_data  data.w.Mo${Mo}.${loopNum} #replace with atom name
+run         0
+variable    mype equal pe
+print       "${pkaType} ${pkaMass} ${mype}" append stats_Mo${Mo}.data #replace w atom name
+
+next        loopNum
+jump        SELF
+################################################################################
+# ---------- SIMULATION DONE ---------------------------------------------------
+print		"All done"
+
+
