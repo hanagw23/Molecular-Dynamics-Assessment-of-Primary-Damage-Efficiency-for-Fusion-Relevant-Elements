@@ -1,0 +1,117 @@
+#TBD
+# Stefano Segantin, December 2022
+# PSFC - MIT
+
+# ---------- INITIALIZATION ----------------------------------------------------
+clear
+echo         both
+timer		     full
+units		     metal  # A ps K bar eV
+dimension	   3
+boundary	   p p p
+atom_style	 atomic
+atom_modify	 map array
+
+# -------- variables -----------------------------------------------------------
+variable    numLoop equal 1
+variable     a loop ${numLoop}
+
+variable    ao equal 3.520 #insert correct lattice constant
+variable    lBox equal 20
+variable    LBox equal ${lBox}*2
+variable    myT equal 300
+variable    relaxSteps equal 10000 #can change this to 10000 for pure system
+
+variable    fV equal 0.10*($a-1) #if you want to add a fraction of another el, can define here
+variable    FV equal 100*${fV}
+
+variable    VSeed equal 25447 #random seeds can be any number, feel free to swap these out 
+variable    TSeed equal 36929 #for every new generated file
+variable    swapSeed equal 33961
+
+# ---------- GEOMETRY DEFINITION -----------------------------------------------
+lattice	    fcc ${ao}
+region		  whole block -${lBox} ${lBox} -${lBox} ${lBox} -${lBox} ${lBox}
+create_box	1 whole
+lattice	    fcc ${ao} orient x 1 0 0 orient y 0 1 0 orient z 0 0 1
+create_atoms	1 region whole #create atoms of type 1 contained across whole region.
+
+#set         type 1 type/fraction 2 ${fV} ${VSeed} #sets fraction fV of type 1 to type 2.
+
+group		    Ni type 1
+#group		    V type 2 - no second type
+
+# ---------- FORCE FIELD -------------------------------------------------------
+#pair_style eam/fs
+#pair_coeff	* * /home/segantin/lammps_models/INTERATOMIC_POTENTIALS/WV.eam.fs W V
+#pair_style	meam
+#pair_coeff	* * /data/home/hanagw/Fe_damage/library.Fe.meam Fe /data/home/hanagw/Fe_damage/
+pair_style	eam/alloy
+pair_coeff 	* * Ni_v6_2.0.eam Ni
+
+# ---------- SETTINGS ----------------------------------------------------------
+# COMPUTES
+#comm_modify cutoff 7.0
+compute	   csym all centro/atom fcc #replace with correct crystal structurec
+compute	   eng all pe/atom
+compute	   myRDF all rdf 2000 1 1 cutoff 6.5 #2000 is the number of rdf bins, replace cutoff with num in potential file
+
+# VARIABLES
+variable  mype equal pe
+variable	N equal count(all)
+#variable	Eavg equal ${mype}/$N
+
+# ---------- DYNAMICS ----------------------------------------------------------
+# PRINT-SCREEN
+thermo		100
+thermo_style	custom step pe lx ly lz press pxx pyy pzz ke
+
+# --------- MC swap and minimization -------------------------------------------
+reset_timestep	0
+
+dump		1 all custom 100000 dump_Ni${FV}.1.* id type xs ys zs c_csym c_eng
+velocity   all create ${myT} ${TSeed} dist gaussian rot yes
+fix		     isoPisoT all npt temp ${myT} ${myT} 0.1 iso 0 0 1
+#fix		     Swap12 all atom/swap 50 500 ${swapSeed} ${myT} types 1 2
+
+#variable   myStep equal step
+#variable   swapsTot12 equal f_Swap12[1]
+#variable   swapsYes12 equal f_Swap12[2]
+#fix       output all print 500 "${myStep} ${mype} ${swapsTot12} ${swapsYes12}" file stats_swap_WV${FV}.data
+# fix       output all print 500 "${myStep} ${mype}" file stats_noswap_WV${FV}.data
+
+timestep   0.001
+run		     ${relaxSteps}
+minimize   1e-20 1e-20 20000 20000
+
+#unfix     output
+#ix		  Swap12
+undump    1
+
+# --------- fix rdf output -----------------------------------------------------
+reset_timestep	0
+fix 		4 all ave/time 100 1 100 c_myRDF[*] file Ni${FV}_rdf.${lBox}.txt mode vector #replace with correct atom
+run		   100
+unfix   isoPisoT
+unfix		4
+
+# ---------- OUTPUTS -----------------------------------------------------------
+
+# WRITE FILES
+variable  aox equal lx/${LBox}
+variable  aoy equal ly/${LBox}
+variable  aoz equal lz/${LBox}
+variable  trueNi equal count(Ni)/$N #replace with correct atom
+print     "${mype}" append PE_swap_Ni.${lBox}.data
+print     "${FV} ${aox} ${aoy} ${aoz}" append ao_swap_Ni.${lBox}.data
+print     "${FV} ${trueNi}" append comp_swap_Ni.${lBox}.data #replace true_ with atom
+write_restart	Ni${FV}_rst.${lBox}.0
+write_data	data.Ni.${lBox}.${FV}.0 #replace w atom
+
+next        a
+jump        SELF
+################################################################################
+# ---------- SIMULATION DONE ---------------------------------------------------
+print		"All done"
+print		"Number of atoms = $N"
+
